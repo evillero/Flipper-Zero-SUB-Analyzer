@@ -72,6 +72,7 @@ typedef enum {
 static void sub_analyzer_select_file(SubAnalyzerApp* app);
 static void sub_analyzer_analyze_file(SubAnalyzerApp* app, const char* path);
 static void sub_analyzer_show_about(SubAnalyzerApp* app);
+static void sub_analyzer_save_analysis(SubAnalyzerApp* app, const char* sub_path);
 
 static uint32_t sub_analyzer_exit_callback(void* context) {
     UNUSED(context);
@@ -96,6 +97,70 @@ static void sub_analyzer_submenu_callback(void* context, uint32_t index) {
 static void sub_analyzer_popup_callback(void* context) {
     SubAnalyzerApp* app = context;
     view_dispatcher_switch_to_view(app->view_dispatcher, SubAnalyzerViewSubmenu);
+}
+
+// Save analysis to Apps Data folder with unique name 
+static void sub_analyzer_save_analysis(SubAnalyzerApp* app, const char* sub_path) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    
+    // Create app data directory if it doesn't exist
+    FuriString* dir_path = furi_string_alloc_set(APP_DATA_PATH(""));
+    furi_string_cat_str(dir_path, "sub_analyzer");
+    if(!storage_simply_mkdir(storage, furi_string_get_cstr(dir_path))) {
+        FURI_LOG_E(TAG, "Failed to create directory %s", furi_string_get_cstr(dir_path));
+        furi_string_free(dir_path);
+        furi_record_close(RECORD_STORAGE);
+        return;
+    }
+    
+    // Get base filename without extension
+    FuriString* base_name = furi_string_alloc();
+    path_extract_filename_no_ext(sub_path, base_name);
+    
+    // Build output path: /data/sub_analyzer/basename.txt (or basename_N.txt)
+    FuriString* out_path = furi_string_alloc();
+    int file_index = 0;
+    bool exists = true;
+    
+    while(exists && file_index < 1000) { // safety limit
+        furi_string_printf(out_path, "%s/%s", furi_string_get_cstr(dir_path), furi_string_get_cstr(base_name));
+        if(file_index == 0) {
+            furi_string_cat_str(out_path, ".txt");
+        } else {
+            furi_string_cat_printf(out_path, "_%d.txt", file_index);
+        }
+        
+        // Check if file exists
+        FileInfo file_info;
+        FS_Error error = storage_common_stat(storage, furi_string_get_cstr(out_path), &file_info);
+        exists = (error == FSE_OK && (file_info.flags & FSF_DIRECTORY) == 0);
+        if(exists) file_index++;
+    }
+    
+    if(file_index >= 1000) {
+        FURI_LOG_E(TAG, "Too many existing files, cannot save analysis");
+        furi_string_free(base_name);
+        furi_string_free(out_path);
+        furi_string_free(dir_path);
+        furi_record_close(RECORD_STORAGE);
+        return;
+    }
+    
+    // Write analysis buffer to file
+    File* file = storage_file_alloc(storage);
+    if(storage_file_open(file, furi_string_get_cstr(out_path), FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        const char* text = furi_string_get_cstr(app->text_buffer);
+        storage_file_write(file, text, strlen(text));
+        FURI_LOG_I(TAG, "Analysis saved to %s", furi_string_get_cstr(out_path));
+    } else {
+        FURI_LOG_E(TAG, "Failed to save analysis to %s", furi_string_get_cstr(out_path));
+    }
+    
+    storage_file_free(file);
+    furi_string_free(base_name);
+    furi_string_free(out_path);
+    furi_string_free(dir_path);
+    furi_record_close(RECORD_STORAGE);
 }
 
 // Main analysis function
@@ -589,6 +654,9 @@ static void sub_analyzer_analyze_file(SubAnalyzerApp* app, const char* path) {
     furi_string_free(protocol_name);
     furi_string_free(preset_name);
     
+    // Auto-save analysis to Apps Data folder
+    sub_analyzer_save_analysis(app, path);
+    
     text_box_set_text(app->text_box, furi_string_get_cstr(app->text_buffer));
     text_box_set_focus(app->text_box, TextBoxFocusStart);
     view_dispatcher_switch_to_view(app->view_dispatcher, SubAnalyzerViewTextBox);
@@ -622,7 +690,10 @@ static void sub_analyzer_show_about(SubAnalyzerApp* app) {
                         "- Pattern detection\n"
                         "- Link budget\n"
                         "- Entropy analysis\n\n"
-                        "Extracts everything!");
+                        "Extracts everything!\n\n"
+                        "Analysis saved to:\n"
+                        "/ext/apps_data/sub_analyzer/\n"
+                        );
 
     text_box_set_text(app->text_box, furi_string_get_cstr(app->text_buffer));
     text_box_set_focus(app->text_box, TextBoxFocusStart);
